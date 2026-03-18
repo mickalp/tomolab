@@ -1,0 +1,10 @@
+name: microct_gui
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pyside6
+  - numpy
+  - tifffile
+  - algotom
+  - pyinstaller
