@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 """
 Build sinograms from a directory of projection TIFFs.
 
@@ -21,17 +20,17 @@ This is compatible with a typical pipeline where ring removal runs per sinogram 
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 import os
 import re
 import tempfile
-from typing import Union
 
 import numpy as np
 import tifffile as tiff
 
 
 _RX_TOMO = re.compile(r"^tomo_(\d+)\.(tif|tiff)$", re.IGNORECASE)
+
 
 def _ensure_dir(path: Union[str, Path]) -> Path:
     p = Path(path)
@@ -52,7 +51,8 @@ def _natural_key(p: Path):
     for part in parts:
         key.append(int(part) if part.isdigit() else part.lower())
     return key
-    
+
+
 def sinograms_to_projection_files(
     *,
     input_mode: str,
@@ -92,13 +92,11 @@ def sinograms_to_projection_files(
     input_path = Path(input_path)
     out_dir = _ensure_dir(output_dir)
 
-    # --- Read sinograms metadata to get H, N, W and provide an iterator over rows (y) ---
     if input_mode == "stack":
         if not input_path.exists():
             raise FileNotFoundError(f"Sinogram stack not found: {input_path}")
 
-        tf = tiff.TiffFile(str(input_path))
-        try:
+        with tiff.TiffFile(str(input_path)) as tf:
             H = len(tf.pages)
             if H == 0:
                 raise ValueError(f"Empty sinogram stack: {input_path}")
@@ -108,23 +106,60 @@ def sinograms_to_projection_files(
                 raise ValueError(f"Expected 2D sinogram pages (N,W). Got {first.shape} in page 0")
             N, W = map(int, first.shape)
 
-            def row_iter():
-                for y in range(H):
-                    arr = tf.pages[y].asarray()
-                    if arr.shape != (N, W):
-                        raise ValueError(
-                            f"Sinogram page shape mismatch at y={y}: got {arr.shape}, expected {(N, W)}"
-                        )
-                    yield y, arr
-        except Exception:
-            tf.close()
-            raise
+            if dtype is None:
+                dtype = np.asarray(first).dtype
+
+            for k in range(N):
+                fpath = out_dir / projection_template.format(index=k)
+                if fpath.exists() and not overwrite:
+                    raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
+
+            with tempfile.TemporaryDirectory(dir=temp_dir) as td:
+                mm_path = Path(td) / "projections_memmap.dat"
+                projs = np.memmap(mm_path, mode="w+", dtype=dtype, shape=(N, H, W))
+
+                try:
+                    for y in range(H):
+                        arr = tf.pages[y].asarray()
+                        if arr.shape != (N, W):
+                            raise ValueError(
+                                f"Sinogram page shape mismatch at y={y}: got {arr.shape}, expected {(N, W)}"
+                            )
+                        projs[:, y, :] = np.asarray(arr, dtype=dtype)
+
+                    projs.flush()
+
+                    for k in range(N):
+                        out_path = out_dir / projection_template.format(index=k)
+
+                        # Make a true detached array copy so no memmap-backed view survives.
+                        img = np.array(projs[k, :, :], copy=True)
+
+                        img = np.nan_to_num(img, nan=0.0, posinf=65535.0, neginf=0.0)
+                        img = np.clip(img, 0, 65535).astype(np.uint16, copy=False)
+
+                        tiff.imwrite(str(out_path), img)
+                        del img
+
+                finally:
+                    try:
+                        projs.flush()
+                    except Exception:
+                        pass
+
+                    mm = getattr(projs, "_mmap", None)
+                    del projs
+                    if mm is not None:
+                        mm.close()
+
     else:
-        # files mode: directory contains H sinogram images (N,W)
         if not input_path.exists() or not input_path.is_dir():
             raise FileNotFoundError(f"Sinogram directory not found: {input_path}")
 
-        sino_files = sorted(list(input_path.glob("*.tif")) + list(input_path.glob("*.tiff")), key=_natural_key)
+        sino_files = sorted(
+            list(input_path.glob("*.tif")) + list(input_path.glob("*.tiff")),
+            key=_natural_key,
+        )
         if not sino_files:
             raise FileNotFoundError(f"No .tif/.tiff sinogram files found in: {input_path}")
 
@@ -134,71 +169,49 @@ def sinograms_to_projection_files(
         N, W = map(int, first.shape)
         H = len(sino_files)
 
-        def row_iter():
-            for y, f in enumerate(sino_files):
-                arr = tiff.imread(str(f))
-                if arr.shape != (N, W):
-                    raise ValueError(
-                        f"Sinogram file shape mismatch at {f.name}: got {arr.shape}, expected {(N, W)}"
-                    )
-                yield y, arr
+        if dtype is None:
+            dtype = np.asarray(first).dtype
 
-    # Decide dtype for output projections
-    if dtype is None:
-        dtype = np.asarray(first).dtype
+        for k in range(N):
+            fpath = out_dir / projection_template.format(index=k)
+            if fpath.exists() and not overwrite:
+                raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
 
-    # If output exists and overwrite not allowed, fail early
-    for k in range(N):
-        fpath = out_dir / projection_template.format(index=k)
-        if fpath.exists() and not overwrite:
-            raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
+        with tempfile.TemporaryDirectory(dir=temp_dir) as td:
+            mm_path = Path(td) / "projections_memmap.dat"
+            projs = np.memmap(mm_path, mode="w+", dtype=dtype, shape=(N, H, W))
 
-    # --- Build projections using a temp memmap to avoid huge RAM usage ---
-    # We store projections as (N, H, W) for efficient assignment per row: proj[:, y, :] = sino (N,W)
-    with tempfile.TemporaryDirectory(dir=temp_dir) as td:
-        mm_path = Path(td) / "projections_memmap.dat"
-        projs = np.memmap(mm_path, mode="w+", dtype=dtype, shape=(N, H, W))
-
-        try:
-            for y, sino in row_iter():
-                # sino shape (N,W) -> write into all projections at row y
-                projs[:, y, :] = np.asarray(sino, dtype=dtype)
-
-            projs.flush()
-
-            # Write each projection k as a separate TIFF (H,W)
-            for k in range(N):
-                out_path = out_dir / projection_template.format(index=k)
-                img = np.asarray(projs[k, :, :])
-
-                # Convert to uint16 for CERA / typical CT projection pipelines
-                # Use rounding + clipping (keeps values in [0, 65535])
-                img = np.nan_to_num(img, nan=0.0, posinf=65535.0, neginf=0.00)
-                # img = np.rint(img)                 # round to nearest integer
-                # img = np.clip(img, 0, 65535).astype(np.uint16, copy=False) #orginaly np.uint16
-
-                tiff.imwrite(
-                    str(out_path),
-                    np.uint16(img), 
-                    # photometric="minisblack",
-                    # resolution=(1, 1),             # XResolution, YResolution
-                    # resolutionunit="inch",         # means "dpi"
-                    # bigtiff=bigtiff,
-                    )
-
-        finally:
-            # IMPORTANT (Windows): close memmap handle so temp files can be deleted
             try:
+                for y, f in enumerate(sino_files):
+                    arr = tiff.imread(str(f))
+                    if arr.shape != (N, W):
+                        raise ValueError(
+                            f"Sinogram file shape mismatch at {f.name}: got {arr.shape}, expected {(N, W)}"
+                        )
+                    projs[:, y, :] = np.asarray(arr, dtype=dtype)
+
                 projs.flush()
+
+                for k in range(N):
+                    out_path = out_dir / projection_template.format(index=k)
+
+                    img = np.array(projs[k, :, :], copy=True)
+                    img = np.nan_to_num(img, nan=0.0, posinf=65535.0, neginf=0.0)
+                    img = np.clip(img, 0, 65535).astype(np.uint16, copy=False)
+
+                    tiff.imwrite(str(out_path), img)
+                    del img
+
             finally:
+                try:
+                    projs.flush()
+                except Exception:
+                    pass
+
                 mm = getattr(projs, "_mmap", None)
                 del projs
                 if mm is not None:
                     mm.close()
-
-    # close stack file handle if needed
-    if input_mode == "stack":
-        tf.close()
 
     return {
         "input_mode": input_mode,
@@ -302,39 +315,35 @@ def build_sinograms_from_projection_dir(
     out_stack_path = Path(spec.output_sinogram_stack_tiff)
     out_dir = Path(spec.output_sinogram_dir) if spec.output_sinogram_dir else None
 
-    # Prepare output destinations
     if mode == "stack":
         out_stack_path.parent.mkdir(parents=True, exist_ok=True)
         if out_stack_path.exists() and not spec.overwrite:
             raise FileExistsError(f"Output exists (use overwrite=True): {out_stack_path}")
         output_location = str(out_stack_path)
     else:
-        # convenience/back-compat: if output_sinogram_dir not provided, treat output_sinogram_stack_tiff as a dir path
         if out_dir is None:
             out_dir = out_stack_path
         out_dir.mkdir(parents=True, exist_ok=True)
         output_location = str(out_dir)
 
-    # temp memmap: (H, N, W) => sinos[row] is (N, W)
     with tempfile.TemporaryDirectory(dir=spec.temp_dir) as td:
         mm_path = Path(td) / "sinograms_memmap.dat"
         sinos = np.memmap(mm_path, mode="w+", dtype=spec.dtype, shape=(H, N, W))
 
-        # Fill memmap one projection at a time: sinos[:, k, :] = projection[:, :]
-        for k, f in enumerate(files):
-            img = tiff.imread(str(f))
-            if img.shape != (H, W):
-                raise ValueError(f"Shape mismatch at {f.name}: got {img.shape}, expected {(H, W)}")
-            sinos[:, k, :] = np.asarray(img, dtype=spec.dtype)
-
-        meta = {"axes": "YX"} if spec.imagej_axes else None
-
         try:
+            for k, f in enumerate(files):
+                img = tiff.imread(str(f))
+                if img.shape != (H, W):
+                    raise ValueError(f"Shape mismatch at {f.name}: got {img.shape}, expected {(H, W)}")
+                sinos[:, k, :] = np.asarray(img, dtype=spec.dtype)
+
+            meta = {"axes": "YX"} if spec.imagej_axes else None
+
             if mode == "stack":
                 with tiff.TiffWriter(str(out_stack_path), bigtiff=spec.bigtiff) as tw:
                     for y in range(H):
                         tw.write(
-                            np.asarray(sinos[y, :, :], dtype=spec.dtype),  # (N, W)
+                            np.asarray(sinos[y, :, :], dtype=spec.dtype),
                             contiguous=True,
                             metadata=meta,
                         )
@@ -347,18 +356,19 @@ def build_sinograms_from_projection_dir(
                         raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
                     tiff.imwrite(
                         str(fpath),
-                        np.asarray(sinos[y, :, :], dtype=spec.dtype),  # (N, W)
+                        np.asarray(sinos[y, :, :], dtype=spec.dtype),
                         metadata=meta,
                     )
         finally:
-            # IMPORTANT (Windows): explicitly close the memmap so the temp file can be deleted
             try:
                 sinos.flush()
-            finally:
-                mm = getattr(sinos, "_mmap", None)
-                del sinos
-                if mm is not None:
-                    mm.close()
+            except Exception:
+                pass
+
+            mm = getattr(sinos, "_mmap", None)
+            del sinos
+            if mm is not None:
+                mm.close()
 
     result = {
         "output_mode": mode,
@@ -375,5 +385,7 @@ def build_sinograms_from_projection_dir(
             str(out_dir / spec.filename_template.format(index=y)) for y in range(H)
         ]
     return result
-# Backward-compatible alias (if you used the previous name elsewhere)
+
+
+# Backward-compatible alias
 build_sinogram_stack_from_projection_dir = build_sinograms_from_projection_dir

@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
 
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(0, 128)
-        self.workers_spin.setValue(0)
+        self.workers_spin.setValue(12)
         self.workers_spin.setToolTip("0 = automatic")
 
         layout.addWidget(QLabel("Mode:"), 0, 0)
@@ -162,6 +162,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(QLabel("Workers:"), 5, 0)
         layout.addWidget(self.workers_spin, 5, 1)
+
 
         return box
 

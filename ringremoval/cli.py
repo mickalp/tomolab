@@ -39,9 +39,9 @@ def add_algorithm_args(p: argparse.ArgumentParser) -> None:
     )
 
 
-    p.add_argument("--snr", type=float, default=3.5)
-    p.add_argument("--la-size", type=int, default=50)
-    p.add_argument("--sm-size", type=int, default=12)
+    p.add_argument("--snr", type=float, default=3.0)
+    p.add_argument("--la-size", type=int, default=51)
+    p.add_argument("--sm-size", type=int, default=21)
     p.add_argument("--dim", type=int, default=1)
 
     p.add_argument("--repair-thresh", type=float, default=5.0)
@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     p_cstack.add_argument("--overwrite", action="store_true")
     p_cstack.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    p_cstack.add_argument("--workers", type=int, default=0,
+    p_cstack.add_argument("--workers", type=int, default=12,
                       help="Number of processes for correction (0=auto)")
     
     add_algorithm_args(p_cstack)

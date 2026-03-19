@@ -35,7 +35,7 @@ class ProjectionJob:
     overwrite: bool = False
     keep_temp: bool = False
     temp_dir: str | None = None
-    workers: int = 0
+    workers: int = 12
 
 
 def _emit(cb: Optional[Callable[[str], None]], message: str) -> None:
@@ -71,12 +71,24 @@ def process_projection_job(
     _emit(log, f"Output: {out_dir}")
 
     temp_root_ctx = None
+    
+    # Always keep temp files on the same drive as the input data unless the user
+    # explicitly selected another temp_dir.
+    if job.temp_dir:
+        temp_base = Path(job.temp_dir).resolve()
+    else:
+        # Put temp workspace beside the input folder, not on C:\Temp
+        temp_base = input_dir / "_ringremoval_temp"
+    
+    temp_base.mkdir(parents=True, exist_ok=True)
+    
     if job.keep_temp:
-        temp_root = Path(job.temp_dir or (out_dir / "_temp")).resolve()
+        temp_root = (temp_base / f"{input_dir.name}_work").resolve()
         temp_root.mkdir(parents=True, exist_ok=True)
     else:
-        temp_root_ctx = tempfile.TemporaryDirectory(dir=job.temp_dir)
+        temp_root_ctx = tempfile.TemporaryDirectory(dir=str(temp_base))
         temp_root = Path(temp_root_ctx.name)
+
 
     try:
         sino_stack = temp_root / "sinograms_stack.tif"
@@ -148,4 +160,8 @@ def process_projection_job(
 
     finally:
         if temp_root_ctx is not None:
-            temp_root_ctx.cleanup()
+            try:
+                temp_root_ctx.cleanup()
+            except PermissionError as e:
+                # On Windows this usually means some file handle is still open.
+                _emit(log, f"Temp cleanup warning: {e}")

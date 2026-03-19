@@ -226,7 +226,7 @@ def correct_tiff_stack(
     step: int = 1,
     indices: Optional[List[int]] = None,
     overwrite: bool = False,
-    workers: int = 0,
+    workers: int = 12,
     on_progress: Optional[Callable[[int, int, int, Dict[str, Any]], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
