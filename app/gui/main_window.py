@@ -130,15 +130,16 @@ class MainWindow(QMainWindow):
         self.correction_combo.addItems([
             "auto", "algotom", "repair", "filtering", "sorting", "wavelet_fft", "dead", "large"
         ])
+        self.correction_combo.setCurrentText("algotom")
 
-        self.snr_spin = QLineEdit("3.5")
+        self.snr_spin = QLineEdit("3.0")
         self.la_size_spin = QSpinBox()
         self.la_size_spin.setRange(1, 100000)
-        self.la_size_spin.setValue(50)
+        self.la_size_spin.setValue(51)
 
         self.sm_size_spin = QSpinBox()
         self.sm_size_spin.setRange(1, 100000)
-        self.sm_size_spin.setValue(12)
+        self.sm_size_spin.setValue(21)
 
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(0, 128)
