@@ -62,6 +62,7 @@ def sinograms_to_projection_files(
     overwrite: bool = False,
     dtype: Optional[np.dtype] = None,
     temp_dir: Optional[str] = None,
+    #use_memmap: bool = True,
     bigtiff: bool = True,
 ) -> dict:
     """
@@ -277,6 +278,7 @@ class ProjectionsToSinogramsSpec:
 
     # Use a memmap temp file to avoid keeping (H,N,W) fully in RAM
     temp_dir: Optional[str] = None
+    use_memmap: bool = False
 
 
 def build_sinograms_from_projection_dir(
@@ -326,50 +328,78 @@ def build_sinograms_from_projection_dir(
         out_dir.mkdir(parents=True, exist_ok=True)
         output_location = str(out_dir)
 
-    with tempfile.TemporaryDirectory(dir=spec.temp_dir) as td:
-        mm_path = Path(td) / "sinograms_memmap.dat"
-        sinos = np.memmap(mm_path, mode="w+", dtype=spec.dtype, shape=(H, N, W))
+    meta = {"axes": "YX"} if spec.imagej_axes else None
 
-        try:
-            for k, f in enumerate(files):
-                img = tiff.imread(str(f))
-                if img.shape != (H, W):
-                    raise ValueError(f"Shape mismatch at {f.name}: got {img.shape}, expected {(H, W)}")
-                sinos[:, k, :] = np.asarray(img, dtype=spec.dtype)
+    if spec.use_memmap:
+        with tempfile.TemporaryDirectory(dir=spec.temp_dir) as td:
+            mm_path = Path(td) / "sinograms_memmap.dat"
+            sinos = np.memmap(mm_path, mode="w+", dtype=spec.dtype, shape=(H, N, W))
 
-            meta = {"axes": "YX"} if spec.imagej_axes else None
+            try:
+                for k, f in enumerate(files):
+                    img = tiff.imread(str(f))
+                    if img.shape != (H, W):
+                        raise ValueError(f"Shape mismatch at {f.name}: got {img.shape}, expected {(H, W)}")
+                    sinos[:, k, :] = np.asarray(img, dtype=spec.dtype)
 
-            if mode == "stack":
-                with tiff.TiffWriter(str(out_stack_path), bigtiff=spec.bigtiff) as tw:
+                if mode == "stack":
+                    with tiff.TiffWriter(str(out_stack_path), bigtiff=spec.bigtiff) as tw:
+                        for y in range(H):
+                            tw.write(
+                                np.asarray(sinos[y, :, :], dtype=spec.dtype),
+                                contiguous=True,
+                                metadata=meta,
+                            )
+                else:
+                    assert out_dir is not None
                     for y in range(H):
-                        tw.write(
+                        fname = spec.filename_template.format(index=y)
+                        fpath = out_dir / fname
+                        if fpath.exists() and not spec.overwrite:
+                            raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
+                        tiff.imwrite(
+                            str(fpath),
                             np.asarray(sinos[y, :, :], dtype=spec.dtype),
-                            contiguous=True,
                             metadata=meta,
                         )
-            else:
-                assert out_dir is not None
+            finally:
+                try:
+                    sinos.flush()
+                finally:
+                    mm = getattr(sinos, "_mmap", None)
+                    del sinos
+                    if mm is not None:
+                        mm.close()
+
+    else:
+        sinos = np.empty((H, N, W), dtype=spec.dtype)
+
+        for k, f in enumerate(files):
+            img = tiff.imread(str(f))
+            if img.shape != (H, W):
+                raise ValueError(f"Shape mismatch at {f.name}: got {img.shape}, expected {(H, W)}")
+            sinos[:, k, :] = np.asarray(img, dtype=spec.dtype)
+
+        if mode == "stack":
+            with tiff.TiffWriter(str(out_stack_path), bigtiff=spec.bigtiff) as tw:
                 for y in range(H):
-                    fname = spec.filename_template.format(index=y)
-                    fpath = out_dir / fname
-                    if fpath.exists() and not spec.overwrite:
-                        raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
-                    tiff.imwrite(
-                        str(fpath),
+                    tw.write(
                         np.asarray(sinos[y, :, :], dtype=spec.dtype),
+                        contiguous=True,
                         metadata=meta,
                     )
-        finally:
-            try:
-                sinos.flush()
-            except Exception:
-                pass
-
-            mm = getattr(sinos, "_mmap", None)
-            del sinos
-            if mm is not None:
-                mm.close()
-
+        else:
+            assert out_dir is not None
+            for y in range(H):
+                fname = spec.filename_template.format(index=y)
+                fpath = out_dir / fname
+                if fpath.exists() and not spec.overwrite:
+                    raise FileExistsError(f"Output exists (use overwrite=True): {fpath}")
+                tiff.imwrite(
+                    str(fpath),
+                    np.asarray(sinos[y, :, :], dtype=spec.dtype),
+                    metadata=meta,
+                )
     result = {
         "output_mode": mode,
         "output": output_location,

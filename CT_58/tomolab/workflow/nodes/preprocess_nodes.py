@@ -29,6 +29,7 @@ class ProjectionsToSinogramsNode(BaseNode):
             recursive=params.get("recursive", src.metadata.get("recursive", False)),
             overwrite=True,
             temp_dir=str(context.temp_dir),
+            use_memmap=params.get("use_memmap", False),
         )
         meta = build_sinograms_from_projection_dir(spec)
 
@@ -72,7 +73,7 @@ class RingRemovalNode(BaseNode):
             output_sino_tiff=str(out_path),
             params=p,
             overwrite=True,
-            workers=params.get("workers", 12),
+            workers=params.get("workers", 1),
         )
 
         return NodeResult(

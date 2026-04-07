@@ -28,13 +28,13 @@ pipeline = Pipeline(
             id="sino1",
             type_name="projections_to_sinograms",
             name="Make sinograms",
-            params={},
+            params={"use_memmap": False},
         ),
         NodeInstance(
             id="ring1",
             type_name="ring_removal",
             name="Ring removal",
-            params={"correction": "algotom", "workers": 12},
+            params={"correction": "algotom", "workers": 1},
         ),
     ],
     edges=[

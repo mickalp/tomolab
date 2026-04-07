@@ -239,6 +239,7 @@ def correct_tiff_stack(
     original selection order.
     """
     tifffile = _import_tifffile()
+    from .engine import correct_sinogram_array
 
     in_path = Path(input_tiff)
     if not in_path.exists():
@@ -280,47 +281,85 @@ def correct_tiff_stack(
     # Safer for Windows multiprocessing: pass plain dict
     params_payload = params.to_dict() if hasattr(params, "to_dict") else params
 
-    with tifffile.TiffWriter(str(out_path), bigtiff=True) as tw, ProcessPoolExecutor(max_workers=workers) as ex:
-        futures = {
-            ex.submit(_correct_stack_page_worker, str(in_path), page_idx, params_payload): page_idx
-            for page_idx in selected
-        }
+    if workers <= 1:
+        logger.info("Running stack correction in serial mode.")
 
-        pending: Dict[int, Tuple[np.ndarray, Dict[str, Any]]] = {}
-        next_i = 0  # index into selected list
+        with tifffile.TiffWriter(str(out_path), bigtiff=True) as tw:
+            with tifffile.TiffFile(str(in_path)) as tf:
+                for page_idx in selected:
+                    if should_cancel and should_cancel():
+                        logger.warning("Stack correction cancelled by user.")
+                        break
 
-        for fut in as_completed(futures):
-            page_idx = futures[fut]
-            if should_cancel and should_cancel():
-                logger.warning("Stack correction cancelled by user.")
-                break
+                    try:
+                        sino = tf.pages[page_idx].asarray()
+                        sino = np.asarray(sino, dtype=np.float32)
 
-            try:
-                pidx, sino_corr, meta = fut.result()
-                pending[pidx] = (sino_corr, meta)
-            except Exception as e:
-                failures.append({"page": page_idx, "error": repr(e)})
-                done += 1
-                if on_progress:
-                    on_progress(done, total, page_idx, {"error": repr(e)})
-                continue
+                        if sino.ndim != 2:
+                            raise ValueError(f"Page {page_idx} is not 2D, got shape {sino.shape}")
 
-            # Flush in correct order whenever the next page is ready
-            while next_i < len(selected) and selected[next_i] in pending:
-                p = selected[next_i]
-                sino_corr, meta = pending.pop(p)
+                        if params.transpose:
+                            sino = sino.T
 
-                tw.write(
-                    sino_corr,  # already float32
-                    contiguous=True,
-                    metadata={"axes": "YX"},
-                )
+                        sino_corr, meta = correct_sinogram_array(sino, params)
 
-                done += 1
-                if on_progress:
-                    on_progress(done, total, p, meta)
+                        tw.write(
+                            sino_corr.astype(np.float32, copy=False),
+                            contiguous=True,
+                            metadata={"axes": "YX"},
+                        )
 
-                next_i += 1
+                        done += 1
+                        if on_progress:
+                            on_progress(done, total, page_idx, meta)
+
+                    except Exception as e:
+                        failures.append({"page": page_idx, "error": repr(e)})
+                        done += 1
+                        if on_progress:
+                            on_progress(done, total, page_idx, {"error": repr(e)})
+
+    else:
+        with tifffile.TiffWriter(str(out_path), bigtiff=True) as tw, ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = {
+                ex.submit(_correct_stack_page_worker, str(in_path), page_idx, params_payload): page_idx
+                for page_idx in selected
+            }
+
+            pending: Dict[int, Tuple[np.ndarray, Dict[str, Any]]] = {}
+            next_i = 0  # index into selected list
+
+            for fut in as_completed(futures):
+                page_idx = futures[fut]
+                if should_cancel and should_cancel():
+                    logger.warning("Stack correction cancelled by user.")
+                    break
+
+                try:
+                    pidx, sino_corr, meta = fut.result()
+                    pending[pidx] = (sino_corr, meta)
+                except Exception as e:
+                    failures.append({"page": page_idx, "error": repr(e)})
+                    done += 1
+                    if on_progress:
+                        on_progress(done, total, page_idx, {"error": repr(e)})
+                    continue
+
+                while next_i < len(selected) and selected[next_i] in pending:
+                    p = selected[next_i]
+                    sino_corr, meta = pending.pop(p)
+
+                    tw.write(
+                        sino_corr,
+                        contiguous=True,
+                        metadata={"axes": "YX"},
+                    )
+
+                    done += 1
+                    if on_progress:
+                        on_progress(done, total, p, meta)
+
+                    next_i += 1
 
     return {
         "total_pages": n_pages,
